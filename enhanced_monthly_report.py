@@ -1,416 +1,212 @@
-#!/usr/bin/env python3
-"""
-CML Enhanced Monthly Usage Report Job
-Run this as a scheduled CML Job on the 1st of each month
-
-This script generates enhanced usage reports using the listUsage API for the previous month:
-- Detailed CSV with all workload records
-- User summary report (top consumers by CPU/GPU/Memory)
-- Project summary report (resource usage by project)
-- Workload type analysis (jobs vs sessions vs applications)
-- JSON report with metadata and statistics
-"""
-
-import sys
 import os
-import json
-from datetime import datetime, timedelta
+import sys
 import cmlapi
 import pandas as pd
+from datetime import datetime, date
 
-# Import our utility functions
-from cml_usage_utils import (
-    send_notification,
-    get_last_month_dates
-)
+def get_last_month_dates():
+    """Calculates the start and end dates for the previous month."""
+    today = date.today()
+    first_day_of_current_month = today.replace(day=1)
+    end_date_of_last_month = first_day_of_current_month - pd.Timedelta(days=1)
+    start_date_of_last_month = end_date_of_last_month.replace(day=1)
+    return start_date_of_last_month, end_date_of_last_month
 
-def get_cml_client():
-    """Initialize CML API client"""
-    try:
-        return cmlapi.default_client()
-    except Exception as e:
-        print(f"ERROR: Failed to initialize CML client: {e}")
-        sys.exit(1)
-
-def get_enhanced_usage_data(start_date, end_date):
+def get_usage_data(start_time, end_time):
     """
-    Fetch comprehensive usage data using listUsage API
+    Fetches all CML usage data and filters manually by date range.
     
     Args:
-        start_date (datetime): Start date for the report
-        end_date (datetime): End date for the report
+        start_time (datetime.date): The start date of the report.
+        end_time (datetime.date): The end date of the report.
     
     Returns:
-        dict: Success status and DataFrame with usage data
+        pandas.DataFrame: A DataFrame containing all usage records for the period.
     """
-    client = get_cml_client()
+    client = cmlapi.default_client()
     
-    # Convert to ISO format with timezone
-    # Ensure we have datetime objects with proper time components
-    if hasattr(start_date, 'date'):
-        # It's already a datetime
-        start_str = start_date.isoformat() + "Z"
-    else:
-        # It's a date, convert to datetime at start of day
-        start_str = datetime.combine(start_date, datetime.min.time()).isoformat() + "Z"
+    print(f"Fetching usage data and filtering for {start_time} to {end_time}...")
     
-    if hasattr(end_date, 'date'):
-        # It's already a datetime  
-        end_str = end_date.isoformat() + "Z"
-    else:
-        # It's a date, convert to datetime at end of day
-        end_str = datetime.combine(end_date, datetime.max.time()).isoformat() + "Z"
+    all_usage_records = []
+    page_token = None
+    page_count = 0
     
-    print(f"📊 Fetching enhanced usage data from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+    # Convert dates to datetime objects for comparison
+    start_datetime = datetime.combine(start_time, datetime.min.time())
+    end_datetime = datetime.combine(end_time, datetime.max.time())
     
-    try:
-        all_usage_records = []
-        page_token = None
-        
-        while True:
-            # Create search filter for time range (similar to get_time_series)
-            time_range = {
-                "created_time": {
-                    "min": start_date.strftime("%Y-%m-%d %H:%M:%S"),
-                    "max": end_date.strftime("%Y-%m-%d %H:%M:%S")
-                }
-            }
-            
-            # Call list_usage API with correct parameters
-            api_params = {
-                'search_filter': json.dumps(time_range),
-                'page_size': 1000
-            }
-            
+    while True:
+        try:
+            # Use the working API call format (no search_filter!)
             if page_token:
-                api_params['page_token'] = page_token
+                usage_list = client.list_usage(page_size=1000, page_token=page_token)
+            else:
+                usage_list = client.list_usage(page_size=1000)
             
-            usage_list = client.list_usage(**api_params)
+            page_count += 1
+            print(f"  Processing page {page_count}...")
             
-            # Extract records from correct field name (usage_response, not usage)
-            all_usage_records.extend(usage_list.usage_response)
+            # Filter the records manually by date
+            if usage_list.usage_response:
+                filtered_records = []
+                for record in usage_list.usage_response:
+                    # The debug showed created_at is already a datetime object
+                    if hasattr(record, 'created_at') and record.created_at:
+                        # Remove timezone info for comparison if present
+                        record_datetime = record.created_at
+                        if record_datetime.tzinfo is not None:
+                            record_datetime = record_datetime.replace(tzinfo=None)
+                        
+                        if start_datetime <= record_datetime <= end_datetime:
+                            filtered_records.append(record)
+                
+                all_usage_records.extend(filtered_records)
+                print(f"    Added {len(filtered_records)} records from this page")
+            
+            # Check for more pages
             page_token = usage_list.next_page_token
             if not page_token:
                 break
-        
-        print(f"✅ Successfully fetched {len(all_usage_records)} usage records")
-        
-        if not all_usage_records:
-            return {
-                'success': False,
-                'data': pd.DataFrame(),
-                'error': 'No usage data found for the specified period'
-            }
-        
-        # Convert to DataFrame
-        df = pd.DataFrame([record.to_dict() for record in all_usage_records])
-        
-        return {
-            'success': True,
-            'data': df,
-            'record_count': len(all_usage_records)
-        }
-        
-    except Exception as e:
-        print(f"❌ Failed to fetch usage data: {e}")
-        return {
-            'success': False,
-            'data': pd.DataFrame(),
-            'error': str(e)
-        }
+                
+        except Exception as e:
+            print(f"Error calling CML API: {e}", file=sys.stderr)
+            break
+            
+    print(f"Successfully fetched {len(all_usage_records)} records for the specified period.")
+    
+    # Convert to DataFrame using the structure we discovered
+    if not all_usage_records:
+        return pd.DataFrame()
+    
+    records_data = []
+    for record in all_usage_records:
+        record_dict = record.to_dict()
+        records_data.append(record_dict)
+    
+    return pd.DataFrame(records_data)
 
-def process_usage_data(df):
-    """
-    Clean and enhance the raw usage DataFrame with calculated metrics
-    
-    Args:
-        df (DataFrame): Raw usage data from listUsage API
-    
-    Returns:
-        DataFrame: Processed data with calculated metrics
-    """
+def process_usage_df(df):
+    """Cleans and enhances the raw usage DataFrame with calculated metrics."""
     if df.empty:
         return df
     
-    try:
-        # Convert numeric columns
-        for col in ['duration', 'cpu', 'memory', 'nvidia_gpu']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-        
-        # Convert timestamps
-        df['created_at'] = pd.to_datetime(df['created_at'])
-        
-        # Extract nested information
-        df['creator_username'] = df['creator_info'].apply(
-            lambda x: x.get('username', 'Unknown') if isinstance(x, dict) else 'Unknown'
-        )
-        df['project_name'] = df['project_info'].apply(
-            lambda x: x.get('name', 'Unknown') if isinstance(x, dict) else 'Unknown'
-        )
-        
-        # Calculate resource-hour metrics
-        df['duration_hours'] = df['duration'] / 3600.0
-        df['cpu_hours'] = df['cpu'] * df['duration_hours']
-        df['gpu_hours'] = df['nvidia_gpu'] * df['duration_hours']
-        df['memory_gb_hours'] = (df['memory'] / 1024) * df['duration_hours']
-        
-        # Additional calculated fields
-        df['has_gpu'] = df['nvidia_gpu'] > 0
-        df['is_long_running'] = df['duration_hours'] > 1.0
-        
-        print(f"✅ Processed {len(df)} records with calculated metrics")
-        return df
-        
-    except Exception as e:
-        print(f"❌ Error processing usage data: {e}")
-        return df
+    # Convert numeric fields - we know the exact field names now
+    numeric_columns = ['cpu', 'memory', 'nvidia_gpu']
+    for col in numeric_columns:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+    
+    # Convert duration - it came as string "0" in the debug
+    df['duration'] = pd.to_numeric(df['duration'], errors='coerce').fillna(0)
+    
+    # created_at is already a datetime, just ensure it
+    df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
+    
+    # Extract usernames from the structures we saw in debug
+    df['creator_username'] = df['creator']  # This was already a plain string
+    df['project_name'] = df['project_name']  # This was already a plain string
+    
+    # Calculate resource-hour metrics
+    df['duration_hours'] = df['duration'] / 3600.0
+    df['cpu_hours'] = df['cpu'] * df['duration_hours'] 
+    df['gpu_hours'] = df['nvidia_gpu'] * df['duration_hours']
+    df['memory_gb_hours'] = (df['memory'] / (1024**3)) * df['duration_hours']  # Convert bytes to GB
+    
+    return df
 
 def generate_summary_reports(df):
-    """Generate aggregated summary reports"""
-    try:
-        # User summary report
-        user_report = df.groupby('creator_username').agg(
-            total_cpu_hours=('cpu_hours', 'sum'),
-            total_memory_gb_hours=('memory_gb_hours', 'sum'),
-            total_gpu_hours=('gpu_hours', 'sum'),
-            total_workloads=('id', 'count'),
-            gpu_workloads=('has_gpu', 'sum'),
-            avg_duration_hours=('duration_hours', 'mean')
-        ).round(2).sort_values(by='total_cpu_hours', ascending=False)
-        
-        # Project summary report
-        project_report = df.groupby('project_name').agg(
-            total_cpu_hours=('cpu_hours', 'sum'),
-            total_memory_gb_hours=('memory_gb_hours', 'sum'),
-            total_gpu_hours=('gpu_hours', 'sum'),
-            total_workloads=('id', 'count'),
-            unique_users=('creator_username', 'nunique')
-        ).round(2).sort_values(by='total_cpu_hours', ascending=False)
-        
-        # Workload type analysis
-        workload_report = df.groupby('workload_type').agg(
-            total_cpu_hours=('cpu_hours', 'sum'),
-            total_memory_gb_hours=('memory_gb_hours', 'sum'),
-            total_gpu_hours=('gpu_hours', 'sum'),
-            total_runs=('id', 'count'),
-            avg_duration_hours=('duration_hours', 'mean')
-        ).round(2).sort_values(by='total_runs', ascending=False)
-        
-        # Status analysis
-        status_report = df.groupby('status').agg(
-            count=('id', 'count'),
-            total_cpu_hours=('cpu_hours', 'sum')
-        ).sort_values(by='count', ascending=False)
-        
-        return {
-            'user_report': user_report,
-            'project_report': project_report,
-            'workload_report': workload_report,
-            'status_report': status_report
-        }
-        
-    except Exception as e:
-        print(f"❌ Error generating summary reports: {e}")
-        return None
-
-def export_reports(processed_df, reports_dict, report_period):
-    """Export all reports to CSV files"""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        export_files = []
-        
-        # Ensure reports directory exists
-        os.makedirs('reports', exist_ok=True)
-        
-        # Export detailed data
-        detailed_cols = [
-            'created_at', 'creator_username', 'project_name', 'workload_type', 
-            'status', 'duration_hours', 'cpu', 'memory', 'nvidia_gpu',
-            'cpu_hours', 'memory_gb_hours', 'gpu_hours', 'has_gpu'
-        ]
-        
-        detailed_filename = f"enhanced_detailed_usage_{report_period}_{timestamp}.csv"
-        detailed_path = os.path.join('reports', detailed_filename)
-        processed_df[detailed_cols].to_csv(detailed_path, index=False)
-        export_files.append(detailed_path)
-        print(f"📁 Exported: {detailed_path}")
-        
-        # Export summary reports
-        summary_files = [
-            ('user_report', f"enhanced_user_summary_{report_period}_{timestamp}.csv"),
-            ('project_report', f"enhanced_project_summary_{report_period}_{timestamp}.csv"),
-            ('workload_report', f"enhanced_workload_summary_{report_period}_{timestamp}.csv"),
-            ('status_report', f"enhanced_status_summary_{report_period}_{timestamp}.csv")
-        ]
-        
-        for report_key, filename in summary_files:
-            if report_key in reports_dict:
-                filepath = os.path.join('reports', filename)
-                reports_dict[report_key].to_csv(filepath)
-                export_files.append(filepath)
-                print(f"📁 Exported: {filepath}")
-        
-        return export_files
-        
-    except Exception as e:
-        print(f"❌ Export failed: {e}")
-        return []
-
-def save_json_report(report_data, report_period):
-    """Save comprehensive JSON report"""
-    try:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
-        filename = f"enhanced_monthly_report_{report_period}_{timestamp}.json"
-        filepath = os.path.join('reports', filename)
-        
-        with open(filepath, 'w') as f:
-            json.dump(report_data, f, indent=2, default=str)
-        
-        print(f"📁 JSON Report: {filepath}")
-        return filepath
-        
-    except Exception as e:
-        print(f"❌ JSON save failed: {e}")
-        return None
+    """Generates several aggregated summary reports from the detailed usage data."""
+    if df.empty:
+        empty_df = pd.DataFrame()
+        return empty_df, empty_df, empty_df
+    
+    user_report = df.groupby('creator_username').agg(
+        total_cpu_hours=('cpu_hours', 'sum'),
+        total_memory_gb_hours=('memory_gb_hours', 'sum'),
+        total_gpu_hours=('gpu_hours', 'sum'),
+        total_workloads=('id', 'count')
+    ).round(2).sort_values(by='total_cpu_hours', ascending=False)
+    
+    project_report = df.groupby('project_name').agg(
+        total_cpu_hours=('cpu_hours', 'sum'),
+        total_memory_gb_hours=('memory_gb_hours', 'sum'),
+        total_gpu_hours=('gpu_hours', 'sum'),
+        total_workloads=('id', 'count')
+    ).round(2).sort_values(by='total_cpu_hours', ascending=False)
+    
+    workload_report = df.groupby('workload_type').agg(
+        total_cpu_hours=('cpu_hours', 'sum'),
+        total_gpu_hours=('gpu_hours', 'sum'),
+        total_runs=('id', 'count')
+    ).round(2).sort_values(by='total_runs', ascending=False)
+    
+    return user_report, project_report, workload_report
 
 def main():
-    """Main function to generate enhanced monthly usage report"""
+    """Main function to orchestrate the report generation."""
+    print("=" * 60)
+    print("CML ENHANCED MONTHLY USAGE REPORT (listUsage API - Fixed)")
+    print("=" * 60)
     
-    print("=" * 70)
-    print("CML ENHANCED MONTHLY USAGE REPORT (listUsage API)")
-    print("=" * 70)
+    start_date, end_date = get_last_month_dates()
+    report_period = start_date.strftime("%Y-%m")
     
-    # Get last month's date range
-    start_date, end_date, year, month = get_last_month_dates()
-    report_period = f"{year}-{month:02d}"
+    # Set the output directory to 'reports'
+    OUTPUT_DIR = "reports"
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    print(f"📅 Generating enhanced report for: {report_period}")
+    print(f"📅 Generating report for: {report_period}")
     print(f"📅 Period: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
     
-    # Initialize comprehensive report data
-    report = {
-        'report_metadata': {
-            'generated_at': datetime.now().isoformat(),
-            'report_period': report_period,
-            'start_date': start_date.isoformat(),
-            'end_date': end_date.isoformat(),
-            'script_name': 'enhanced_monthly_report.py',
-            'api_method': 'listUsage'
-        },
-        'data_summary': {},
-        'export_files': [],
-        'processing_summary': {}
-    }
+    # 1. Fetch and process data
+    usage_df = get_usage_data(start_date, end_date)
+    if usage_df.empty:
+        print("No usage data found for the specified period. Exiting.")
+        return
+        
+    processed_df = process_usage_df(usage_df)
     
-    # 1. Fetch enhanced usage data
-    usage_result = get_enhanced_usage_data(start_date, end_date)
+    # 2. Generate summary reports
+    user_report, project_report, workload_report = generate_summary_reports(processed_df)
     
-    if not usage_result['success']:
-        error_message = f"Enhanced monthly report FAILED - {usage_result['error']}"
-        send_notification(error_message, f"CML Enhanced Report ERROR - {report_period}")
-        print(f"\n❌ {error_message}")
-        return 1
-    
-    # 2. Process the data
-    processed_df = process_usage_data(usage_result['data'])
-    
-    if processed_df.empty:
-        error_message = f"Enhanced monthly report FAILED - no processable data for {report_period}"
-        send_notification(error_message, f"CML Enhanced Report ERROR - {report_period}")
-        print(f"\n❌ {error_message}")
-        return 1
-    
-    # 3. Generate summary reports
-    summary_reports = generate_summary_reports(processed_df)
-    
-    if not summary_reports:
-        error_message = f"Enhanced monthly report FAILED - could not generate summaries for {report_period}"
-        send_notification(error_message, f"CML Enhanced Report ERROR - {report_period}")
-        print(f"\n❌ {error_message}")
-        return 1
-    
-    # 4. Display key insights
-    print(f"\n📊 DATA INSIGHTS")
-    print(f"=" * 70)
-    print(f"Total Records: {len(processed_df)}")
-    print(f"Total CPU Hours: {processed_df['cpu_hours'].sum():.1f}")
-    print(f"Total GPU Hours: {processed_df['gpu_hours'].sum():.1f}")
-    print(f"Total Memory GB-Hours: {processed_df['memory_gb_hours'].sum():.1f}")
-    print(f"Unique Users: {processed_df['creator_username'].nunique()}")
-    print(f"Unique Projects: {processed_df['project_name'].nunique()}")
-    
-    print(f"\n--- Top 5 Users by CPU Hours ---")
-    print(summary_reports['user_report'][['total_cpu_hours', 'total_workloads', 'gpu_workloads']].head())
-    
-    print(f"\n--- Top 5 Projects by CPU Hours ---")
-    print(summary_reports['project_report'][['total_cpu_hours', 'total_workloads', 'unique_users']].head())
-    
-    print(f"\n--- Usage by Workload Type ---")
-    print(summary_reports['workload_report'])
-    
-    # 5. Export reports
-    exported_files = export_reports(processed_df, summary_reports, report_period)
-    
-    # 6. Update report metadata
-    report['data_summary'] = {
-        'total_records': len(processed_df),
-        'total_cpu_hours': float(processed_df['cpu_hours'].sum()),
-        'total_gpu_hours': float(processed_df['gpu_hours'].sum()),
-        'total_memory_gb_hours': float(processed_df['memory_gb_hours'].sum()),
-        'unique_users': int(processed_df['creator_username'].nunique()),
-        'unique_projects': int(processed_df['project_name'].nunique()),
-        'date_range_days': (end_date - start_date).days
-    }
-    
-    report['export_files'] = exported_files
-    report['processing_summary'] = {
-        'records_fetched': usage_result['record_count'],
-        'records_processed': len(processed_df),
-        'files_exported': len(exported_files)
-    }
-    
-    # 7. Save JSON report
-    json_file = save_json_report(report, report_period)
-    if json_file:
-        report['export_files'].append(json_file)
-    
-    # 8. Print final summary
-    print(f"\n" + "=" * 70)
-    print(f"📋 ENHANCED REPORT SUMMARY")
-    print(f"=" * 70)
-    print(f"📅 Period: {report_period}")
-    print(f"📊 Records: {report['data_summary']['total_records']}")
-    print(f"👥 Users: {report['data_summary']['unique_users']}")
-    print(f"📂 Projects: {report['data_summary']['unique_projects']}")
-    print(f"📁 Files created: {len(report['export_files'])}")
-    
-    for filename in report['export_files']:
-        print(f"   - {filename}")
-    
-    # 9. Send notification
-    message = f"""Enhanced CML usage report completed successfully!
+    # 3. Print summaries to console
+    print("\n--- Top 5 User Consumption ---")
+    print(user_report.head())
+    print("\n--- Top 5 Project Consumption ---") 
+    print(project_report.head())
+    print("\n--- Consumption by Workload Type ---")
+    print(workload_report)
 
-Period: {report_period}
-Records Processed: {report['data_summary']['total_records']:,}
-Total CPU Hours: {report['data_summary']['total_cpu_hours']:.1f}
-Total GPU Hours: {report['data_summary']['total_gpu_hours']:.1f}
-Unique Users: {report['data_summary']['unique_users']}
-Unique Projects: {report['data_summary']['unique_projects']}
-
-Files Generated: {len(report['export_files'])}
-{chr(10).join(['- ' + f for f in report['export_files']])}
-"""
+    # 4. Export reports to CSV
+    timestamp = datetime.now().strftime("%Y%m%d")
     
-    send_notification(message, f"CML Enhanced Usage Report - {report_period}")
+    # Export detailed, granular data
+    detailed_cols = [
+        'created_at', 'creator_username', 'project_name', 'workload_type', 
+        'status', 'duration_hours', 'cpu_hours', 'memory_gb_hours', 'gpu_hours'
+    ]
+    detailed_filename = f"{OUTPUT_DIR}/{report_period}_detailed_usage_{timestamp}.csv"
+    processed_df[detailed_cols].to_csv(detailed_filename, index=False)
     
-    print(f"\n✅ Enhanced monthly report completed successfully!")
-    return 0
+    # Export aggregated reports
+    user_filename = f"{OUTPUT_DIR}/{report_period}_user_summary_{timestamp}.csv"
+    project_filename = f"{OUTPUT_DIR}/{report_period}_project_summary_{timestamp}.csv"
+    workload_filename = f"{OUTPUT_DIR}/{report_period}_workload_summary_{timestamp}.csv"
+    
+    user_report.to_csv(user_filename)
+    project_report.to_csv(project_filename)
+    workload_report.to_csv(workload_filename)
+    
+    print("\n" + "=" * 60)
+    print(f"✅ Reports successfully generated in the '{OUTPUT_DIR}' directory.")
+    print(f"   - {detailed_filename}")
+    print(f"   - {user_filename}")
+    print(f"   - {project_filename}")
+    print(f"   - {workload_filename}")
+    print("=" * 60)
 
 if __name__ == "__main__":
     try:
-        exit_code = main()
-        sys.exit(exit_code)
+        main()
     except Exception as e:
-        print(f"\n💥 FATAL ERROR: {e}")
-        send_notification(f"CML Enhanced Usage Report FATAL ERROR: {e}", "CML Enhanced Report CRITICAL ERROR")
+        print(f"\n💥 A fatal error occurred: {e}", file=sys.stderr)
         sys.exit(1)
