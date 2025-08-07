@@ -111,18 +111,18 @@ def main():
             successful_resources.append(usage_data)
             
             # Export individual CSV
-            csv_filename = f"cml_{resource_type}_usage_{filename_period}.csv"
+            csv_filename = f"custom_{resource_type}_usage_{filename_period}.csv"
             if export_to_csv(usage_data, csv_filename):
-                report['export_files'].append(csv_filename)
+                report['export_files'].append(f"reports/{csv_filename}")
         else:
             print(f"  ❌ Failed to get {resource_type} data: {usage_data['error']}")
     
     # Create combined CSV if we have any successful data
     if successful_resources:
         print(f"\n📊 Creating combined report...")
-        combined_filename = f"cml_combined_usage_{filename_period}.csv"
+        combined_filename = f"custom_combined_usage_{filename_period}.csv"
         if create_combined_csv(successful_resources, combined_filename):
-            report['export_files'].append(combined_filename)
+            report['export_files'].append(f"reports/{combined_filename}")
     
     # Calculate summary statistics
     total_points = sum([r['statistics']['total_data_points'] for r in successful_resources])
@@ -135,9 +135,9 @@ def main():
     }
     
     # Save JSON report
-    json_filename = f"cml_custom_report_{filename_period}.json"
+    json_filename = f"custom_report_{filename_period}.json"
     if save_report_json(report, json_filename):
-        report['export_files'].append(json_filename)
+        report['export_files'].append(f"reports/{json_filename}")
     
     # Print summary
     print(f"\n" + "=" * 60)

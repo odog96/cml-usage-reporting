@@ -127,9 +127,13 @@ def export_to_csv(usage_data, filename):
         df = df[['timestamp_str', 'count']]  # Keep only essential columns
         df.columns = ['timestamp', f"{usage_data['series_type']}_count"]
         
+        # Ensure reports directory exists and prepend to filename
+        os.makedirs('reports', exist_ok=True)
+        filepath = os.path.join('reports', filename)
+        
         # Export to CSV
-        df.to_csv(filename, index=False)
-        print(f"📁 Exported: {filename}")
+        df.to_csv(filepath, index=False)
+        print(f"📁 Exported: {filepath}")
         return True
         
     except Exception as e:
@@ -158,9 +162,13 @@ def create_combined_csv(resource_data_list, filename):
         df = pd.DataFrame(combined_data)
         pivot_df = df.pivot(index='timestamp', columns='resource_type', values='count').fillna(0)
         
+        # Ensure reports directory exists and prepend to filename
+        os.makedirs('reports', exist_ok=True)
+        filepath = os.path.join('reports', filename)
+        
         # Export
-        pivot_df.to_csv(filename)
-        print(f"📁 Combined CSV: {filename}")
+        pivot_df.to_csv(filepath)
+        print(f"📁 Combined CSV: {filepath}")
         return True
         
     except Exception as e:
@@ -170,9 +178,13 @@ def create_combined_csv(resource_data_list, filename):
 def save_report_json(report_data, filename):
     """Save full report as JSON"""
     try:
-        with open(filename, 'w') as f:
+        # Ensure reports directory exists and prepend to filename
+        os.makedirs('reports', exist_ok=True)
+        filepath = os.path.join('reports', filename)
+        
+        with open(filepath, 'w') as f:
             json.dump(report_data, f, indent=2, default=str)
-        print(f"📁 Report JSON: {filename}")
+        print(f"📁 Report JSON: {filepath}")
         return True
     except Exception as e:
         print(f"❌ JSON save failed: {e}")

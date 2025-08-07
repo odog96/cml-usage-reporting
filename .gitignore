@@ -4,6 +4,7 @@ node_modules
 __pycache__
 .*
 *.csv
+*claude*
 *.json
 !.gitignore
 !.experiments
