@@ -1,0 +1,9 @@
+R
+node_modules
+*.pyc
+__pycache__
+.*
+*.csv
+*.json
+!.gitignore
+!.experiments
